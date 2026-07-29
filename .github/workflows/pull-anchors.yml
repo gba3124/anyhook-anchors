@@ -1,0 +1,48 @@
+name: pull anchors
+
+# Pull, never push. AnyHook has no credentials for this repo — this workflow
+# fetches the public endpoint and commits what it sees. An anchor AnyHook cannot
+# write is worth more than one it can.
+on:
+  schedule:
+    - cron: "30 1 * * *" # after AnyHook's 00:10 UTC seal
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  pull:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch anchors
+        run: |
+          mkdir -p anchors
+          curl -fsS https://anyhook.net/api/v1/anchors \
+            | jq -c '.anchors[]' \
+            | while read -r a; do
+                day=$(printf '%s' "$a" | jq -r .day | cut -c1-10)
+                printf '%s' "$a" | jq -S . > "anchors/$day.json"
+              done
+
+      - name: Refuse to rewrite history
+        # The endpoint returns a 400-day window, so every previously committed
+        # anchor is re-fetched each run. If one of them now differs, the upstream
+        # log was altered after publication — fail loudly rather than commit over it.
+        run: |
+          changed=$(git diff --name-only --diff-filter=M -- anchors/)
+          if [ -n "$changed" ]; then
+            echo "::error::published anchor changed upstream: $changed"
+            git diff -- anchors/
+            exit 1
+          fi
+
+      - name: Commit
+        run: |
+          git config user.name "anchor-bot"
+          git config user.email "actions@github.com"
+          git add anchors/
+          git diff --cached --quiet || git commit -m "anchors $(date -u +%F)"
+          git push
